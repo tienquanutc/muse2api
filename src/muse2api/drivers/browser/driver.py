@@ -56,6 +56,8 @@ STABLE_POLLS_DONE = 4
 STABLE_POLLS_FORCE = 12
 # Past this many assistant bubbles the page gets slow and a new thread is cheaper.
 HOT_BUBBLE_LIMIT = 16
+# How long the page may take to show the prompt it was sent before we call it lost.
+SEND_CONFIRM_TIMEOUT = 8.0
 # Requests that fail on every healthy page too (Sentry tunnel); not worth reporting.
 NOISY_REQUESTS = ("/monitoring",)
 
@@ -430,23 +432,38 @@ class BrowserDriver(MuseDriver):
             await asyncio.sleep(1.0)
 
     async def _send(self, tab: _Tab, prompt: str) -> None:
+        before = await tab.session.evaluate(dom.SEND_STATE) or {}
         res = await tab.session.evaluate(dom.fill_input(prompt))
         if not (res or {}).get("ok"):
             raise UpstreamError(f"cannot fill chat input: {(res or {}).get('err')}")
+        how, button = "enter", "missing"
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            if await tab.session.evaluate(dom.CLICK_SEND) == "clicked":
-                return
+            button = await tab.session.evaluate(dom.CLICK_SEND)
+            if button == "clicked":
+                how = "click"
+                break
             await asyncio.sleep(0.1)
-        for kind in ("keyDown", "keyUp"):
-            await tab.session.send(
-                "Input.dispatchKeyEvent",
-                {"type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
-                 **({"text": "\r"} if kind == "keyDown" else {})},
-            )
-        await asyncio.sleep(0.5)
-        if not await tab.session.evaluate(dom.INPUT_EMPTY):
-            raise UpstreamError("send button not found and Enter did not submit")
+        else:
+            for kind in ("keyDown", "keyUp"):
+                await tab.session.send(
+                    "Input.dispatchKeyEvent",
+                    {"type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+                     **({"text": "\r"} if kind == "keyDown" else {})},
+                )
+        after: dict = {}
+        deadline = time.monotonic() + SEND_CONFIRM_TIMEOUT
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+            after = await tab.session.evaluate(dom.SEND_STATE) or {}
+            if (after.get("users", 0) > before.get("users", 0) or after.get("generating")
+                    or after.get("path") != before.get("path")):
+                return
+        input_state = "kept" if after.get("input") else "cleared"
+        log.warning("prompt not accepted: sent by %s (send button %s), input %s, before=%s after=%s "
+                    "problems=%s", how, button, input_state, before, after, list(tab.problems))
+        raise UpstreamError(f"muse.ai did not accept the prompt (sent by {how}, send button "
+                            f"{button}, input {input_state})")
 
     async def _state(self, tab: _Tab) -> dict:
         state = await tab.session.evaluate(dom.CHAT_STATE) or {}

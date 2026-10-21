@@ -14,6 +14,7 @@ AGENT_BUBBLE = 'div[class*="hatch-agent-bubble-bg"]'
 # Quick-reply suggestions ("Give me sunglasses") are buttons styled with the agent
 # bubble background; they are not part of the reply and must not count as one.
 QUICK_REPLY = "button,[role=button]"
+USER_BUBBLE = '[class*="bg-chat-user-bubble"]'
 ATTACHMENT = '[data-testid^="hatch-chat-attachment-presentation-"]'
 STOP_BUTTON = 'button[aria-label*="Stop" i]'
 # The agent asks before acting on the user's behalf (e.g. uploading the result to
@@ -137,6 +138,16 @@ CLICK_SEND = """(() => {
 })()"""
 
 INPUT_EMPTY = f"!(document.querySelector({q(INPUT)}) || {{value: ''}}).value"
+
+# Evidence that muse.ai took the prompt: the user's bubble shows up, the new thread
+# opens (/thread/new -> /thread/<id>) or the agent starts working. An emptied input
+# alone proves nothing; a re-render clears it too.
+SEND_STATE = f"""(() => ({{
+  users: document.querySelectorAll({q(USER_BUBBLE)}).length,
+  path: location.pathname,
+  generating: !!document.querySelector({q(STOP_BUTTON)}),
+  input: (document.querySelector({q(INPUT)}) || {{value: ''}}).value.length,
+}}))()"""
 
 
 def attach_file(b64: str, mime: str, filename: str) -> str:

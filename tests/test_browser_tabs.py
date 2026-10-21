@@ -323,3 +323,44 @@ def test_watch_page_records_failed_requests_and_errors():
     assert got == ["HTTP 403 POST https://muse.ai/thread/new",
                    "net::ERR_FAILED POST https://muse.ai/api/auth/check",
                    "exception Error: boom"]
+
+
+# ---- sending the prompt ----
+
+class _ComposerSession(_FakeSession):
+    """A composer whose Send click either posts the prompt or just empties the input."""
+
+    def __init__(self, accepts: bool) -> None:
+        self.accepts = accepts
+        self.page = {"users": 0, "path": "/thread/new", "generating": False, "input": 0}
+
+    async def send(self, method, params=None):
+        return {}
+
+    async def evaluate(self, expr, **_):
+        from muse2api.drivers.browser import dom
+
+        if expr == dom.SEND_STATE:
+            return dict(self.page)
+        if expr == dom.CLICK_SEND:
+            self.page["input"] = 0
+            if self.accepts:
+                self.page.update(users=1, path="/thread/abc")
+            return "clicked"
+        self.page["input"] = 2  # fill_input
+        return {"ok": True}
+
+
+async def test_send_returns_once_the_prompt_shows_up(driver):
+    tab = _Tab("a0", "ctx", "t", _ComposerSession(accepts=True))
+    await driver._send(tab, "hi")
+
+
+async def test_send_fails_fast_when_the_input_is_emptied_but_nothing_is_posted(driver, monkeypatch):
+    import muse2api.drivers.browser.driver as mod
+    from muse2api.errors import UpstreamError
+
+    monkeypatch.setattr(mod, "SEND_CONFIRM_TIMEOUT", 0.5)
+    tab = _Tab("a0", "ctx", "t", _ComposerSession(accepts=False))
+    with pytest.raises(UpstreamError, match="did not accept the prompt.*input cleared"):
+        await driver._send(tab, "hi")
