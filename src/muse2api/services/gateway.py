@@ -56,6 +56,7 @@ class Gateway:
                     tried.append(lease.account.id)
                     # Once text reached the client we cannot transparently switch accounts.
                     if emitted or not self._should_retry(exc, attempt, tried):
+                        log.warning("chat failed on %s: %s", lease.account.id, exc)
                         raise
                     log.warning("chat failed on %s (%s), failing over", lease.account.id, exc)
 
@@ -69,6 +70,7 @@ class Gateway:
                     lease.fail(exc)
                     tried.append(lease.account.id)
                     if not self._should_retry(exc, attempt, tried):
+                        log.warning("call failed on %s: %s", lease.account.id, exc)
                         raise
                     log.warning("call failed on %s (%s), failing over", lease.account.id, exc)
         raise AssertionError("unreachable")

@@ -248,3 +248,43 @@ async def test_new_thread_timeout_says_why(driver, monkeypatch, page, reason):
     tab = _Tab("a0", "ctx", "t", _PageSession(page))
     with pytest.raises(UpstreamTimeout, match=reason):
         await driver._new_thread(tab)
+
+
+# ---- waiting for the first token ----
+
+class _SilentSession(_ScriptedSession):
+    """A page whose reply never shows up; ``unsent`` keeps the prompt in the input."""
+
+    def __init__(self, unsent: bool) -> None:
+        super().__init__([{"agentCount": 0, "lastText": "", "generating": False, "tail": ""}])
+        self.unsent = unsent
+
+    async def evaluate(self, expr, **_):
+        from muse2api.drivers.browser import dom
+
+        if expr == dom.INPUT_EMPTY:
+            return not self.unsent
+        if expr == "location.href":
+            return "https://muse.ai/thread/new"
+        return await super().evaluate(expr)
+
+
+@pytest.mark.parametrize("unsent, reason", [
+    (True, "no first token from assistant: the prompt was never sent"),
+    (False, "no first token from assistant$"),
+])
+async def test_first_token_timeout_says_if_the_prompt_was_sent(driver, monkeypatch, unsent, reason):
+    from muse2api.drivers.base import ChatRequest
+    from muse2api.errors import UpstreamTimeout
+
+    tab = _Tab("a0", "ctx", "t", _SilentSession(unsent))
+    tab.busy = True
+
+    async def begin(account, req):
+        return tab, {"agentCount": 0, "lastText": ""}
+
+    monkeypatch.setattr(driver, "_begin_chat", begin)
+    req = ChatRequest(prompt="hi", model="m", first_token_timeout=0.2)
+    with pytest.raises(UpstreamTimeout, match=reason):
+        async for _ in driver.chat_stream(ACC, req):
+            pass

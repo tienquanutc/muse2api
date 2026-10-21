@@ -511,6 +511,7 @@ class BrowserDriver(MuseDriver):
         started = time.monotonic()
         emitted, last, stable, got_first = "", None, 0, False
         finished = False
+        st: dict = {}
         try:
             while True:
                 if req.cancel and req.cancel.is_set():
@@ -519,7 +520,14 @@ class BrowserDriver(MuseDriver):
                 if elapsed > req.timeout:
                     raise UpstreamTimeout("assistant reply timed out")
                 if not got_first and elapsed > req.first_token_timeout:
-                    raise UpstreamTimeout("no first token from assistant")
+                    unsent = not await tab.session.evaluate(dom.INPUT_EMPTY)
+                    log.warning("no first token after %.0fs: path=%s unsent=%s generating=%s "
+                                "agentCount=%s (base %s) lastText=%r tail=%r",
+                                elapsed, await self._href(tab), unsent, st.get("generating"),
+                                st.get("agentCount"), base_count, (st.get("lastText") or "")[:120],
+                                " ".join((st.get("tail") or "").split())[-300:])
+                    raise UpstreamTimeout("no first token from assistant"
+                                          + (": the prompt was never sent" if unsent else ""))
                 await asyncio.sleep(POLL_INTERVAL)
                 st = await self._state(tab)
                 if st.get("approval"):
