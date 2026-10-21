@@ -114,27 +114,29 @@ LAST_BUBBLE_MEDIA = f"""(() => {{
 }})()"""
 
 
-def fill_input(text: str) -> str:
-    """Set the textarea value through the native setter so React picks it up."""
-    return f"""(() => {{
+# The prompt is typed and the Send button clicked with real (trusted) CDP input
+# events: muse.ai empties the composer on a synthetic el.click() / value setter but
+# never posts the message. These scripts only prepare and locate.
+FOCUS_INPUT = f"""(() => {{
   const ta = document.querySelector({q(INPUT)});
   if (!ta) return {{ ok: false, err: 'no-input' }};
+  ta.scrollIntoView({{ block: 'center' }});
   ta.focus();
-  const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set;
-  setter.call(ta, {q(text)});
-  ta.dispatchEvent(new Event('input', {{ bubbles: true }}));
-  return {{ ok: true, len: ta.value.length }};
+  ta.select();
+  return {{ ok: document.activeElement === ta }};
 }})()"""
 
-
-CLICK_SEND = """(() => {
+# Centre of the visible Send button, for a mouse click. The button only renders
+# once the composer holds text.
+SEND_BUTTON = """(() => {
   const btn = [...document.querySelectorAll('button,[role=button]')]
     .filter(b => b.offsetParent !== null)
     .find(b => /send|发送/i.test((b.getAttribute('aria-label') || '') + ' ' + (b.getAttribute('data-testid') || '')));
-  if (!btn) return 'missing';
-  if (btn.disabled) return 'disabled';
-  btn.click();
-  return 'clicked';
+  if (!btn) return { state: 'missing' };
+  if (btn.disabled) return { state: 'disabled' };
+  btn.scrollIntoView({ block: 'center' });
+  const r = btn.getBoundingClientRect();
+  return { state: 'ready', x: r.left + r.width / 2, y: r.top + r.height / 2 };
 })()"""
 
 INPUT_EMPTY = f"!(document.querySelector({q(INPUT)}) || {{value: ''}}).value"

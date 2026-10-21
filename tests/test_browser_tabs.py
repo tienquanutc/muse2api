@@ -333,8 +333,16 @@ class _ComposerSession(_FakeSession):
     def __init__(self, accepts: bool) -> None:
         self.accepts = accepts
         self.page = {"users": 0, "path": "/thread/new", "generating": False, "input": 0}
+        self.calls: list[str] = []
 
     async def send(self, method, params=None):
+        self.calls.append(f"{method}:{(params or {}).get('type', '')}")
+        if method == "Input.insertText":
+            self.page["input"] = len(params["text"])
+        elif method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
+            self.page["input"] = 0
+            if self.accepts:
+                self.page.update(users=1, path="/thread/abc")
         return {}
 
     async def evaluate(self, expr, **_):
@@ -342,18 +350,20 @@ class _ComposerSession(_FakeSession):
 
         if expr == dom.SEND_STATE:
             return dict(self.page)
-        if expr == dom.CLICK_SEND:
-            self.page["input"] = 0
-            if self.accepts:
-                self.page.update(users=1, path="/thread/abc")
-            return "clicked"
-        self.page["input"] = 2  # fill_input
-        return {"ok": True}
+        if expr == dom.FOCUS_INPUT:
+            return {"ok": True}
+        if expr == dom.SEND_BUTTON:
+            return {"state": "ready", "x": 10, "y": 20} if self.page["input"] else {"state": "missing"}
+        return {}
 
 
 async def test_send_returns_once_the_prompt_shows_up(driver):
     tab = _Tab("a0", "ctx", "t", _ComposerSession(accepts=True))
     await driver._send(tab, "hi")
+    # Typed and clicked with trusted input events, not page scripts.
+    assert tab.session.calls == ["Input.insertText:", "Input.dispatchMouseEvent:mouseMoved",
+                                 "Input.dispatchMouseEvent:mousePressed",
+                                 "Input.dispatchMouseEvent:mouseReleased"]
 
 
 async def test_send_fails_fast_when_the_input_is_emptied_but_nothing_is_posted(driver, monkeypatch):

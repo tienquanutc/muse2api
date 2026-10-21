@@ -431,17 +431,27 @@ class BrowserDriver(MuseDriver):
         if images:
             await asyncio.sleep(1.0)
 
+    @staticmethod
+    async def _click(tab: _Tab, x: float, y: float) -> None:
+        await tab.session.send("Input.dispatchMouseEvent", {"type": "mouseMoved", "x": x, "y": y})
+        for kind in ("mousePressed", "mouseReleased"):
+            await tab.session.send("Input.dispatchMouseEvent",
+                                   {"type": kind, "x": x, "y": y, "button": "left", "clickCount": 1})
+
     async def _send(self, tab: _Tab, prompt: str) -> None:
         before = await tab.session.evaluate(dom.SEND_STATE) or {}
-        res = await tab.session.evaluate(dom.fill_input(prompt))
+        res = await tab.session.evaluate(dom.FOCUS_INPUT)
         if not (res or {}).get("ok"):
-            raise UpstreamError(f"cannot fill chat input: {(res or {}).get('err')}")
+            raise UpstreamError(f"cannot focus chat input: {(res or {}).get('err', 'not focused')}")
+        await tab.session.send("Input.insertText", {"text": prompt})
         how, button = "enter", "missing"
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
-            button = await tab.session.evaluate(dom.CLICK_SEND)
-            if button == "clicked":
-                how = "click"
+            btn = await tab.session.evaluate(dom.SEND_BUTTON) or {}
+            button = btn.get("state", "missing")
+            if button == "ready":
+                await self._click(tab, btn["x"], btn["y"])
+                how, button = "click", "clicked"
                 break
             await asyncio.sleep(0.1)
         else:
