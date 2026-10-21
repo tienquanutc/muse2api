@@ -334,17 +334,38 @@ class BrowserDriver(MuseDriver):
         await tab.session.send("Page.navigate", {"url": muse.NEW_THREAD_URL})
         deadline = time.monotonic() + self.settings.page_ready_timeout
         state: dict = {}
+        unanswered = 0
         while time.monotonic() < deadline:
             await asyncio.sleep(0.25)
             # A busy page can leave Runtime.evaluate unanswered while it loads; poll again.
-            with contextlib.suppress(CDPError, TimeoutError):
+            try:
                 state = await tab.session.evaluate(dom.PAGE_STATE, timeout=5.0) or {}
-                if state.get("ready"):
-                    return
+            except (CDPError, TimeoutError):
+                unanswered += 1
+                continue
+            if state.get("ready"):
+                return
         head = (state.get("head") or "").lower()
         if any(h in head for h in dom.LOGIN_HINTS):
             raise UpstreamAuthError("muse.ai redirected to login; cookies are no longer valid")
-        raise UpstreamTimeout("muse.ai page did not become ready")
+        reason = self._not_ready_reason(state, unanswered)
+        log.warning("new thread not ready after %.0fs (%s): path=%s hasInput=%s hydration=%s "
+                    "unanswered=%d head=%r", self.settings.page_ready_timeout, reason,
+                    state.get("path"), state.get("hasInput"), state.get("hydration"),
+                    unanswered, " ".join((state.get("head") or "").split())[:300])
+        raise UpstreamTimeout(f"muse.ai page did not become ready: {reason}")
+
+    @staticmethod
+    def _not_ready_reason(state: dict, unanswered: int) -> str:
+        if not state:
+            return f"page never answered ({unanswered} evaluations timed out)"
+        if "Connecting..." in (state.get("head") or ""):
+            return "workspace stuck on 'Connecting...'"
+        if not state.get("hasInput"):
+            return f"no chat input on {state.get('path') or 'page'}"
+        if state.get("hydration") not in (None, "hydrated"):
+            return f"page not hydrated ({state.get('hydration')})"
+        return "page still loading"
 
     # ------------------------------------------------------------ input
     async def _attach(self, tab: _Tab, images: list[InputImage]) -> None:

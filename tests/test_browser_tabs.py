@@ -217,3 +217,34 @@ async def test_quota_hint_only_counts_in_the_finished_reply(driver):
              "lastText": "You've reached your usage limit. Try again later.", "generating": False}
     with pytest.raises(UpstreamQuotaError, match="usage limit"):
         await driver._state(_media_tab([quota]))
+
+
+# ---- opening a new thread ----
+
+class _PageSession(_FakeSession):
+    def __init__(self, page: dict | None) -> None:
+        self.page = page
+
+    async def send(self, method, params=None):
+        return {}
+
+    async def evaluate(self, expr, **_):
+        if self.page is None:
+            raise TimeoutError
+        return self.page
+
+
+@pytest.mark.parametrize("page, reason", [
+    ({"ready": False, "hasInput": True, "hydration": "hydrated", "path": "/thread/new",
+      "head": "Muse\nConnecting..."}, "Connecting..."),
+    ({"ready": False, "hasInput": False, "hydration": None, "path": "/onboarding",
+      "head": "Welcome"}, "no chat input on /onboarding"),
+    (None, "page never answered"),
+])
+async def test_new_thread_timeout_says_why(driver, monkeypatch, page, reason):
+    from muse2api.errors import UpstreamTimeout
+
+    monkeypatch.setattr(driver.settings, "page_ready_timeout", 0.3)
+    tab = _Tab("a0", "ctx", "t", _PageSession(page))
+    with pytest.raises(UpstreamTimeout, match=reason):
+        await driver._new_thread(tab)

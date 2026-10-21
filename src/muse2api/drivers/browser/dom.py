@@ -43,6 +43,7 @@ PAGE_STATE = f"""(() => {{
            && (!hydration || hydration.getAttribute('data-hatch-shell-hydration-state') === 'hydrated')
            && !body.includes('Connecting...'),
     hasInput: !!document.querySelector({q(INPUT)}),
+    hydration: hydration ? hydration.getAttribute('data-hatch-shell-hydration-state') : null,
     path: location.pathname,
     head: body.slice(0, 800),
   }};
