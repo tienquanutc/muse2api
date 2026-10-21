@@ -11,6 +11,9 @@ import json
 
 INPUT = "textarea"
 AGENT_BUBBLE = 'div[class*="hatch-agent-bubble-bg"]'
+# Quick-reply suggestions ("Give me sunglasses") are buttons styled with the agent
+# bubble background; they are not part of the reply and must not count as one.
+QUICK_REPLY = "button,[role=button]"
 ATTACHMENT = '[data-testid^="hatch-chat-attachment-presentation-"]'
 STOP_BUTTON = 'button[aria-label*="Stop" i]'
 # The agent asks before acting on the user's behalf (e.g. uploading the result to
@@ -26,6 +29,10 @@ STALL_HINTS = ("Still sending", "Connecting...")
 def q(value: str) -> str:
     """JSON-quote a Python string for safe interpolation into JS."""
     return json.dumps(value)
+
+
+AGENT_BUBBLES = (f"[...document.querySelectorAll({q(AGENT_BUBBLE)})]"
+                 f".filter(b => !b.closest({q(QUICK_REPLY)}))")
 
 
 PAGE_STATE = f"""(() => {{
@@ -48,7 +55,7 @@ CHAT_STATE = f"""(() => {{
     return (s.overflowY === 'auto' || s.overflowY === 'scroll') && e.scrollHeight > e.clientHeight + 50;
   }});
   scrollers.forEach(e => {{ e.scrollTop = e.scrollHeight; }});
-  const bubbles = [...document.querySelectorAll({q(AGENT_BUBBLE)})];
+  const bubbles = {AGENT_BUBBLES};
   const last = bubbles.length ? (bubbles[bubbles.length - 1].innerText || '').trim() : '';
   const atts = [...document.querySelectorAll({q(ATTACHMENT)})].map(a => {{
     const v = a.querySelector('video'), i = a.querySelector('img');
@@ -90,7 +97,7 @@ DENY_APPROVALS = f"""(() => {{
 # bubble for every candidate URL (anchor hrefs, media element srcs incl. blob:,
 # and bare URLs in the text) and returns the bubble HTML for diagnostics.
 LAST_BUBBLE_MEDIA = f"""(() => {{
-  const bubbles = [...document.querySelectorAll({q(AGENT_BUBBLE)})];
+  const bubbles = {AGENT_BUBBLES};
   const b = bubbles.length ? bubbles[bubbles.length - 1] : null;
   if (!b) return {{ links: [], html: '' }};
   const urls = [];
