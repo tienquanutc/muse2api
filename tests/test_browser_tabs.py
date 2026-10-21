@@ -288,3 +288,38 @@ async def test_first_token_timeout_says_if_the_prompt_was_sent(driver, monkeypat
     with pytest.raises(UpstreamTimeout, match=reason):
         async for _ in driver.chat_stream(ACC, req):
             pass
+
+
+# ---- recording what went wrong on the page ----
+
+class _EventSession(_FakeSession):
+    def __init__(self) -> None:
+        self.listeners: dict[str, list] = {}
+
+    def on(self, method, cb):
+        self.listeners.setdefault(method, []).append(cb)
+
+    def fire(self, method, **params):
+        for cb in self.listeners.get(method, []):
+            cb(params)
+
+
+def test_watch_page_records_failed_requests_and_errors():
+    tab = _Tab("a0", "ctx", "t", _EventSession())
+    BrowserDriver._watch_page(tab)
+    fire = tab.session.fire
+    for rid, url in [("1", "https://muse.ai/thread/new"), ("2", "https://muse.ai/api/auth/check?x=1"),
+                     ("3", "https://muse.ai/monitoring?o=1"), ("4", "https://muse.ai/api/session")]:
+        fire("Network.requestWillBeSent", requestId=rid, request={"url": url, "method": "POST"})
+    fire("Network.responseReceived", requestId="1", response={"status": 403})
+    fire("Network.loadingFinished", requestId="1")
+    fire("Network.loadingFailed", requestId="2", errorText="net::ERR_FAILED")
+    fire("Network.responseReceived", requestId="3", response={"status": 503})
+    fire("Network.responseReceived", requestId="4", response={"status": 200})
+    fire("Runtime.exceptionThrown", exceptionDetails={"exception": {"description": "Error: boom"}})
+    fire("Runtime.consoleAPICalled", type="log", args=[{"value": "fine"}])
+
+    got = [p.split(" ", 1)[1] for p in tab.problems]
+    assert got == ["HTTP 403 POST https://muse.ai/thread/new",
+                   "net::ERR_FAILED POST https://muse.ai/api/auth/check",
+                   "exception Error: boom"]

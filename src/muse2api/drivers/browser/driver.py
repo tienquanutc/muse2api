@@ -18,6 +18,7 @@ import base64
 import contextlib
 import logging
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -55,6 +56,8 @@ STABLE_POLLS_DONE = 4
 STABLE_POLLS_FORCE = 12
 # Past this many assistant bubbles the page gets slow and a new thread is cheaper.
 HOT_BUBBLE_LIMIT = 16
+# Requests that fail on every healthy page too (Sentry tunnel); not worth reporting.
+NOISY_REQUESTS = ("/monitoring",)
 
 
 def is_thread_url(url: str) -> bool:
@@ -79,6 +82,8 @@ class _Tab:
     stale: bool = False
     """Cookies were renewed; close this tab once it is idle."""
     closed: bool = False
+    problems: deque[str] = field(default_factory=lambda: deque(maxlen=20))
+    """Recent failed requests and page errors, reported when the page gets stuck."""
 
     @property
     def has_state(self) -> bool:
@@ -216,7 +221,50 @@ class BrowserDriver(MuseDriver):
         await session.send("Emulation.setFocusEmulationEnabled", {"enabled": True})
         await session.send("Page.setWebLifecycleState", {"state": "active"})
         await self._set_cookies(session, account)
-        return _Tab(account.id, context_id, target_id, session)
+        tab = _Tab(account.id, context_id, target_id, session)
+        self._watch_page(tab)
+        return tab
+
+    @staticmethod
+    def _watch_page(tab: _Tab) -> None:
+        """Record failed requests and page errors so a stuck page can say why."""
+        pending: dict[str, str] = {}
+
+        def note(what: str) -> None:
+            tab.problems.append(f"{time.strftime('%H:%M:%S')} {what}")
+
+        def sent(p: dict) -> None:
+            req = p.get("request") or {}
+            url = (req.get("url") or "").split("?")[0]
+            if url.startswith("http") and "/_next/static/" not in url:
+                pending[p["requestId"]] = f"{req.get('method', 'GET')} {url}"
+
+        def responded(p: dict) -> None:
+            res = p.get("response") or {}
+            what = pending.get(p.get("requestId", ""))
+            if what and (res.get("status") or 0) >= 400 and not any(n in what for n in NOISY_REQUESTS):
+                note(f"HTTP {res['status']} {what}")
+
+        def failed(p: dict) -> None:
+            what = pending.pop(p.get("requestId", ""), None)
+            if what and not p.get("canceled") and not any(n in what for n in NOISY_REQUESTS):
+                note(f"{p.get('blockedReason') or p.get('errorText') or 'failed'} {what}")
+
+        def thrown(p: dict) -> None:
+            d = p.get("exceptionDetails") or {}
+            note("exception " + ((d.get("exception") or {}).get("description") or d.get("text") or "")[:200])
+
+        def console(p: dict) -> None:
+            if p.get("type") == "error":
+                args = p.get("args") or [{}]
+                note("console.error " + str(args[0].get("value") or args[0].get("description") or "")[:200])
+
+        tab.session.on("Network.requestWillBeSent", sent)
+        tab.session.on("Network.responseReceived", responded)
+        tab.session.on("Network.loadingFinished", lambda p: pending.pop(p.get("requestId", ""), None))
+        tab.session.on("Network.loadingFailed", failed)
+        tab.session.on("Runtime.exceptionThrown", thrown)
+        tab.session.on("Runtime.consoleAPICalled", console)
 
     async def _close_tab(self, tab: _Tab) -> None:
         """Idempotent; marks the tab closed first so a cancelled close never leaves it
@@ -331,6 +379,7 @@ class BrowserDriver(MuseDriver):
 
     async def _new_thread(self, tab: _Tab) -> None:
         self._forget(tab)
+        tab.problems.clear()
         await tab.session.send("Page.navigate", {"url": muse.NEW_THREAD_URL})
         deadline = time.monotonic() + self.settings.page_ready_timeout
         state: dict = {}
@@ -350,9 +399,10 @@ class BrowserDriver(MuseDriver):
             raise UpstreamAuthError("muse.ai redirected to login; cookies are no longer valid")
         reason = self._not_ready_reason(state, unanswered)
         log.warning("new thread not ready after %.0fs (%s): path=%s hasInput=%s hydration=%s "
-                    "unanswered=%d head=%r", self.settings.page_ready_timeout, reason,
+                    "unanswered=%d head=%r problems=%s", self.settings.page_ready_timeout, reason,
                     state.get("path"), state.get("hasInput"), state.get("hydration"),
-                    unanswered, " ".join((state.get("head") or "").split())[:300])
+                    unanswered, " ".join((state.get("head") or "").split())[:300],
+                    list(tab.problems))
         raise UpstreamTimeout(f"muse.ai page did not become ready: {reason}")
 
     @staticmethod
@@ -522,10 +572,10 @@ class BrowserDriver(MuseDriver):
                 if not got_first and elapsed > req.first_token_timeout:
                     unsent = not await tab.session.evaluate(dom.INPUT_EMPTY)
                     log.warning("no first token after %.0fs: path=%s unsent=%s generating=%s "
-                                "agentCount=%s (base %s) lastText=%r tail=%r",
+                                "agentCount=%s (base %s) lastText=%r tail=%r problems=%s",
                                 elapsed, await self._href(tab), unsent, st.get("generating"),
                                 st.get("agentCount"), base_count, (st.get("lastText") or "")[:120],
-                                " ".join((st.get("tail") or "").split())[-300:])
+                                " ".join((st.get("tail") or "").split())[-300:], list(tab.problems))
                     raise UpstreamTimeout("no first token from assistant"
                                           + (": the prompt was never sent" if unsent else ""))
                 await asyncio.sleep(POLL_INTERVAL)
