@@ -58,6 +58,9 @@ STABLE_POLLS_FORCE = 12
 HOT_BUBBLE_LIMIT = 16
 # How long the page may take to show the prompt it was sent before we call it lost.
 SEND_CONFIRM_TIMEOUT = 8.0
+# Longest wait for loading skeletons once the page is otherwise ready, in case one
+# never goes away.
+LOADING_GRACE = 10.0
 # Requests that fail on every healthy page too (Sentry tunnel); not worth reporting.
 NOISY_REQUESTS = ("/monitoring",)
 
@@ -386,6 +389,7 @@ class BrowserDriver(MuseDriver):
         deadline = time.monotonic() + self.settings.page_ready_timeout
         state: dict = {}
         unanswered = 0
+        ready_since: float | None = None
         while time.monotonic() < deadline:
             await asyncio.sleep(0.25)
             # A busy page can leave Runtime.evaluate unanswered while it loads; poll again.
@@ -394,7 +398,14 @@ class BrowserDriver(MuseDriver):
             except (CDPError, TimeoutError):
                 unanswered += 1
                 continue
-            if state.get("ready"):
+            if not state.get("ready"):
+                ready_since = None
+                continue
+            ready_since = ready_since or time.monotonic()
+            if not state.get("loading"):
+                return
+            if time.monotonic() - ready_since > LOADING_GRACE:
+                log.info("muse.ai still shows %s; using the page anyway", state["loading"])
                 return
         head = (state.get("head") or "").lower()
         if any(h in head for h in dom.LOGIN_HINTS):
@@ -440,27 +451,50 @@ class BrowserDriver(MuseDriver):
 
     async def _send(self, tab: _Tab, prompt: str) -> None:
         before = await tab.session.evaluate(dom.SEND_STATE) or {}
+        for attempt in (1, 2):
+            how, button = await self._submit(tab, prompt)
+            after = await self._await_posted(tab, before)
+            if after is None:
+                return
+            # An emptied composer with nothing posted means the page dropped the prompt
+            # (it was not quite ready); nothing went out, so one more try is safe.
+            if attempt == 1 and not after.get("input"):
+                log.info("prompt dropped by the page (sent by %s), sending again", how)
+                await asyncio.sleep(1.0)
+                continue
+            break
+        input_state = "kept" if after.get("input") else "cleared"
+        log.warning("prompt not accepted: sent by %s (send button %s), input %s, before=%s after=%s "
+                    "problems=%s", how, button, input_state, before, after, list(tab.problems))
+        raise UpstreamError(f"muse.ai did not accept the prompt (sent by {how}, send button "
+                            f"{button}, input {input_state})")
+
+    async def _submit(self, tab: _Tab, prompt: str) -> tuple[str, str]:
+        """Type the prompt and press Send; returns how it was sent and the button state."""
         res = await tab.session.evaluate(dom.FOCUS_INPUT)
         if not (res or {}).get("ok"):
             raise UpstreamError(f"cannot focus chat input: {(res or {}).get('err', 'not focused')}")
         await tab.session.send("Input.insertText", {"text": prompt})
-        how, button = "enter", "missing"
+        button = "missing"
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
             btn = await tab.session.evaluate(dom.SEND_BUTTON) or {}
             button = btn.get("state", "missing")
             if button == "ready":
                 await self._click(tab, btn["x"], btn["y"])
-                how, button = "click", "clicked"
-                break
+                return "click", "clicked"
             await asyncio.sleep(0.1)
-        else:
-            for kind in ("keyDown", "keyUp"):
-                await tab.session.send(
-                    "Input.dispatchKeyEvent",
-                    {"type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
-                     **({"text": "\r"} if kind == "keyDown" else {})},
-                )
+        for kind in ("keyDown", "keyUp"):
+            await tab.session.send(
+                "Input.dispatchKeyEvent",
+                {"type": kind, "key": "Enter", "code": "Enter", "windowsVirtualKeyCode": 13,
+                 **({"text": "\r"} if kind == "keyDown" else {})},
+            )
+        return "enter", button
+
+    @staticmethod
+    async def _await_posted(tab: _Tab, before: dict) -> dict | None:
+        """None once the page shows the prompt went out, else the last SEND_STATE."""
         after: dict = {}
         deadline = time.monotonic() + SEND_CONFIRM_TIMEOUT
         while time.monotonic() < deadline:
@@ -468,12 +502,8 @@ class BrowserDriver(MuseDriver):
             after = await tab.session.evaluate(dom.SEND_STATE) or {}
             if (after.get("users", 0) > before.get("users", 0) or after.get("generating")
                     or after.get("path") != before.get("path")):
-                return
-        input_state = "kept" if after.get("input") else "cleared"
-        log.warning("prompt not accepted: sent by %s (send button %s), input %s, before=%s after=%s "
-                    "problems=%s", how, button, input_state, before, after, list(tab.problems))
-        raise UpstreamError(f"muse.ai did not accept the prompt (sent by {how}, send button "
-                            f"{button}, input {input_state})")
+                return None
+        return after
 
     async def _state(self, tab: _Tab) -> dict:
         state = await tab.session.evaluate(dom.CHAT_STATE) or {}

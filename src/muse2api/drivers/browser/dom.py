@@ -21,6 +21,9 @@ STOP_BUTTON = 'button[aria-label*="Stop" i]'
 # muse.ai/files as a public link). Nobody answers it here, so it would block for minutes.
 APPROVAL_CARD = '[data-testid="hatch-inline-approval-card"]'
 FILE_INPUT = 'input[type="file"]'
+# Skeleton placeholders (chat_history, status_panel, ...) shown while the shell is
+# already hydrated. A prompt sent before they clear can be dropped by the composer.
+LOADING = "[data-hatch-loading-state]"
 
 LOGIN_HINTS = ("log in", "sign in", "create an account", "use another account")
 QUOTA_HINTS = ("out of credits", "usage limit", "limit reached", "token limit")
@@ -45,6 +48,7 @@ PAGE_STATE = f"""(() => {{
            && !body.includes('Connecting...'),
     hasInput: !!document.querySelector({q(INPUT)}),
     hydration: hydration ? hydration.getAttribute('data-hatch-shell-hydration-state') : null,
+    loading: [...document.querySelectorAll({q(LOADING)})].map(e => e.getAttribute('data-hatch-loading-state')),
     path: location.pathname,
     head: body.slice(0, 800),
   }};

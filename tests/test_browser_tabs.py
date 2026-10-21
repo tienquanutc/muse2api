@@ -330,8 +330,9 @@ def test_watch_page_records_failed_requests_and_errors():
 class _ComposerSession(_FakeSession):
     """A composer whose Send click either posts the prompt or just empties the input."""
 
-    def __init__(self, accepts: bool) -> None:
+    def __init__(self, accepts: bool, drops_first: bool = False) -> None:
         self.accepts = accepts
+        self.drops = 1 if drops_first else 0
         self.page = {"users": 0, "path": "/thread/new", "generating": False, "input": 0}
         self.calls: list[str] = []
 
@@ -341,7 +342,9 @@ class _ComposerSession(_FakeSession):
             self.page["input"] = len(params["text"])
         elif method == "Input.dispatchMouseEvent" and params["type"] == "mouseReleased":
             self.page["input"] = 0
-            if self.accepts:
+            if self.drops:
+                self.drops -= 1
+            elif self.accepts:
                 self.page.update(users=1, path="/thread/abc")
         return {}
 
@@ -374,3 +377,45 @@ async def test_send_fails_fast_when_the_input_is_emptied_but_nothing_is_posted(d
     tab = _Tab("a0", "ctx", "t", _ComposerSession(accepts=False))
     with pytest.raises(UpstreamError, match="did not accept the prompt.*input cleared"):
         await driver._send(tab, "hi")
+
+
+async def test_send_retries_once_when_the_page_drops_the_prompt(driver, monkeypatch):
+    import muse2api.drivers.browser.driver as mod
+
+    monkeypatch.setattr(mod, "SEND_CONFIRM_TIMEOUT", 0.5)
+    tab = _Tab("a0", "ctx", "t", _ComposerSession(accepts=True, drops_first=True))
+    await driver._send(tab, "hi")
+    assert tab.session.calls.count("Input.insertText:") == 2
+
+
+# ---- waiting for loading skeletons ----
+
+READY = {"ready": True, "hasInput": True, "hydration": "hydrated", "path": "/thread/new", "head": ""}
+
+
+class _LoadingSession(_PageSession):
+    """Ready page whose skeletons clear after ``polls`` evaluations (never if None)."""
+
+    def __init__(self, polls: int | None) -> None:
+        super().__init__(READY)
+        self.polls = polls
+        self.seen = 0
+
+    async def evaluate(self, expr, **_):
+        self.seen += 1
+        done = self.polls is not None and self.seen > self.polls
+        return {**READY, "loading": [] if done else ["status_panel"]}
+
+
+async def test_new_thread_waits_for_loading_skeletons(driver):
+    tab = _Tab("a0", "ctx", "t", _LoadingSession(polls=3))
+    await driver._new_thread(tab)
+    assert tab.session.seen == 4
+
+
+async def test_new_thread_does_not_wait_forever_for_a_skeleton(driver, monkeypatch):
+    import muse2api.drivers.browser.driver as mod
+
+    monkeypatch.setattr(mod, "LOADING_GRACE", 0.3)
+    tab = _Tab("a0", "ctx", "t", _LoadingSession(polls=None))
+    await driver._new_thread(tab)
