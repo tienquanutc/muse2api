@@ -191,8 +191,77 @@ def test_video_task(client, auth):
     assert task["result"]["url"].endswith(".mp4")
 
 
-def test_reserved_endpoints(client, auth):
-    assert client.post("/v1/responses", headers=auth, json={}).status_code == 501
+def _capture_chat_requests(client, monkeypatch) -> list:
+    gateway = client.app.state.services.gateway
+    original, seen = gateway.chat_stream, []
+
+    async def spy(req):
+        seen.append(req)
+        async for d in original(req):
+            yield d
+
+    monkeypatch.setattr(gateway, "chat_stream", spy)
+    return seen
+
+
+def test_responses_non_stream_string_input(client, auth):
+    r = client.post("/v1/responses", headers=auth, json={"input": "hello"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["object"] == "response"
+    assert body["status"] == "completed"
+    assert body["id"].startswith("resp_")
+    out = body["output"][0]
+    assert out["type"] == "message" and out["role"] == "assistant"
+    assert "hello" in out["content"][0]["text"]
+    assert body["usage"]["total_tokens"] > 0
+
+
+def test_responses_items_and_instructions(client, auth, monkeypatch):
+    seen = _capture_chat_requests(client, monkeypatch)
+    r = client.post("/v1/responses", headers=auth, json={
+        "instructions": "be terse",
+        "input": [{"role": "user", "content": "what time"},
+                  {"type": "message", "role": "assistant", "content": "noon"},
+                  {"role": "user", "content": "and date"}]})
+    assert r.status_code == 200
+    # instructions folded in as a System block, turns preserved.
+    assert "[System]\nbe terse" in seen[0].prompt
+    assert seen[0].turns[0] == ("system", "be terse")
+
+
+def test_responses_stream(client, auth):
+    with client.stream("POST", "/v1/responses", headers=auth, json={
+        "input": "stream me", "stream": True,
+    }) as r:
+        assert r.status_code == 200
+        events = [json.loads(ln[6:]) for ln in r.iter_lines() if ln.startswith("data: ")]
+    types = [e["type"] for e in events]
+    assert types[:4] == ["response.created", "response.in_progress",
+                        "response.output_item.added", "response.content_part.added"]
+    assert all(t == "response.output_text.delta" for t in types[4:-2])
+    assert len(types) > 6
+    assert types[-2:] == ["response.output_item.done", "response.completed"]
+    first, last = events[0], events[-1]
+    assert first["response"]["status"] == "in_progress"
+    assert first["response"]["output"] == []
+    final = last["response"]
+    assert final["status"] == "completed"
+    text = "".join(e["delta"] for e in events if e["type"] == "response.output_text.delta")
+    assert text == final["output"][0]["content"][0]["text"]
+    assert "stream me" in text
+    seqs = [e["sequence_number"] for e in events]
+    assert seqs == sorted(seqs) and len(set(seqs)) == len(seqs)
+
+
+def test_responses_rejects_bad_input(client, auth):
+    empty = client.post("/v1/responses", headers=auth, json={"input": "  "})
+    assert empty.status_code == 400
+    tools = client.post("/v1/responses", headers=auth, json={
+        "input": [{"type": "function_call", "name": "get_weather",
+                   "arguments": "{}"}]})
+    assert tools.status_code == 400
+    assert "function calling" in tools.json()["error"]["message"]
 
 
 def _capture_image_requests(client, monkeypatch) -> list:

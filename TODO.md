@@ -12,25 +12,25 @@ Priorities: **P0** must be done first · **P1** core feature · **P2** better ex
 
 | ID | Task | Priority | Location | Owner | Status |
 |---|---|---|---|---|---|
-| A1 | Install dependencies, get tests and lint passing | P0 | `tests/` | | Not started |
+| A1 | Install dependencies, get tests and lint passing | P0 | `tests/` | | Done (local; CI runs on push) |
 | A2 | Test the browser driver with real accounts | P0 | `drivers/browser/` | | Not started |
 | A3 | Verify how image/video generation is triggered | P0 | `drivers/browser/driver.py` | | Not started |
 | A4 | Verify session renewal | P0 | `upstream/muse.py` | | Not started |
 | A5 | Verify the Docker image builds and runs | P1 | `Dockerfile` | | Not started |
-| A6 | Enable GitHub Actions CI | P1 | `.github/workflows/ci.yml` | | Not started |
+| A6 | Enable GitHub Actions CI | P1 | `.github/workflows/ci.yml` | | Done (workflow file in main) |
 | B1 | Direct HTTP protocol driver | P1 | `drivers/http/` | | Not started |
 | B2 | Reuse conversation threads to cut first-token latency | P2 | `drivers/browser/` | | Done |
-| B3 | Quota lookup | P2 | `MuseDriver.quota` | | Not started |
-| C1 | `/v1/responses` endpoint | P1 | `api/routes/responses.py` | | Not started |
+| B3 | Quota lookup | P2 | `MuseDriver.quota` | | Partial (mock done; real-driver lookup open) |
+| C1 | `/v1/responses` endpoint | P1 | `api/routes/responses.py` | | Done (local; verified with the official OpenAI SDK streaming + non-streaming against the mock driver; real-account check pending) |
 | C2 | `/v1/images/edits` endpoint | P1 | `api/routes/images.py` | | Not started |
 | C3 | Emulated tool calling | P2 | `core/prompt.py` | | Not started |
-| C4 | Streaming heartbeats to avoid client timeouts | P2 | `api/routes/chat.py` | | Not started |
-| D1 | Support more cookie import formats | P1 | `api/routes/admin.py` | | Not started |
+| C4 | Streaming heartbeats to avoid client timeouts | P2 | `api/routes/chat.py` | | Done |
+| D1 | Support more cookie import formats | P1 | `api/routes/admin.py` | | Done |
 | D2 | Cookie import browser extension | P2 | `extension/` (new) | | Not started |
 | D3 | Web admin console | P2 | `web/` (new) | | Not started |
 | D4 | SQLite / Redis storage backends | P3 | `accounts/store.py` | | Not started |
-| E1 | Automatic media cleanup | P2 | `core/media.py` | | Not started |
-| E2 | Multiple API keys and rate limiting | P3 | `api/deps.py` | | Not started |
+| E1 | Automatic media cleanup | P2 | `core/media.py` | | Done |
+| E2 | Multiple API keys and rate limiting | P3 | `api/deps.py` | | Partial (per-key management done; rate limiting open) |
 | E3 | Observability (metrics, logs) | P3 | `observability/` (new) | | Not started |
 
 ---
@@ -98,6 +98,7 @@ Done. A follow-up whose `messages` continue the conversation already on the page
 - Implement `MuseDriver.quota` to read the account's plan, weekly usage and remaining quota.
 - Show quota in `/admin/accounts`, and let scheduling prefer accounts with plenty of quota left.
 - Also declare `quota=True` in `DriverCapabilities` and add a fake implementation to `MockDriver`.
+- **Partially done (2026-10-04)**: `MockDriver` declares `quota=True` and returns a deterministic fake snapshot; `GET /admin/accounts/{id}/quota` persists the snapshot into account meta (visible in `GET /admin/accounts`). Real browser/http driver quota lookup still open.
 
 ---
 
@@ -156,6 +157,9 @@ Done. A follow-up whose `messages` continue the conversation already on the page
 ### E2 Multiple API keys and rate limiting · P3
 - There is currently a single API key and a single admin key.
 - Support multiple keys (each with its own rate limit and usage statistics), managed through the admin API.
+- **Partially done**: per-key management is done (`POST/GET/PATCH/DELETE /admin/keys`, plus `/admin/keys/usage`). Per-key rate limiting still open.
+
+**Out-of-board note (2026-10-19)**: an SSRF guard for server-side image fetches (`core/media.py`, commit `a7759d4`) was implemented outside this numbering. It is *not* this E2 task, so the numbering is unchanged; this note exists to avoid confusion.
 
 ### E3 Observability · P3
 - Expose Prometheus metrics: request count, latency, first-token latency, per-account success/failure counts, queue wait time.
